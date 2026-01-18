@@ -16,7 +16,7 @@ class PhraseSearchEngine:
     
     def __init__(self, db_path='church_fathers.db'):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
     
     def exact_phrase_search(self, phrase: str, limit=50) -> List[Dict]:

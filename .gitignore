@@ -1,20 +1,7 @@
-# Python
 __pycache__/
-*.py[cod]
-*.so
-.Python
-venv/
-ENV/
-.venv
-
-# Database
-*.db
+*.pyc
+*.pyo
 *.db-journal
-
-# IDE
-.vscode/
-.idea/
 .DS_Store
-
-# Logs
-*.log
+.env
+venv/
