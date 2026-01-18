@@ -1,39 +1,56 @@
-#!/usr/bin/env python3
-"""
-Phrase Search Engine for Church Fathers Database
-Supports exact phrase matching, proximity search, and fuzzy phrase matching
-"""
-
 import sqlite3
-import re
-from typing import List, Dict, Tuple
-from collections import defaultdict
-import difflib
-
+from difflib import SequenceMatcher
 
 class PhraseSearchEngine:
-    """Search engine with advanced phrase search capabilities"""
-    
-    def __init__(self, db_path='church_fathers.db'):
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-    
-    def exact_phrase_search(self, phrase: str, limit=50) -> List[Dict]:
-        """
-        Search for exact phrase matches
-        Uses the pre-computed phrase index for very fast lookups
-        """
-        cursor = self.conn.cursor()
+    def __init__(self, db_name='church_fathers.db'):
+        self.db_name = db_name
+        self.conn = None
+        self.cursor = None
         
-        # Normalize phrase
-        normalized_phrase = ' '.join(re.findall(r'\b\w+\b', phrase.lower()))
+    def connect(self):
+        """Connect to the database"""
+        self.conn = sqlite3.connect(self.db_name)
+        self.cursor = self.conn.cursor()
         
-        # Query the phrases table
-        cursor.execute('''
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
+    
+    def get_stats(self):
+        """Get database statistics"""
+        self.connect()
+        
+        stats = {}
+        
+        # Count authors
+        self.cursor.execute('SELECT COUNT(*) FROM authors')
+        stats['authors'] = self.cursor.fetchone()[0]
+        
+        # Count works
+        self.cursor.execute('SELECT COUNT(*) FROM works')
+        stats['works'] = self.cursor.fetchone()[0]
+        
+        # Count chapters
+        self.cursor.execute('SELECT COUNT(*) FROM chapters')
+        stats['chapters'] = self.cursor.fetchone()[0]
+        
+        # Count phrases
+        self.cursor.execute('SELECT COUNT(*) FROM phrases')
+        stats['phrases'] = self.cursor.fetchone()[0]
+        
+        self.close()
+        return stats
+    
+    def exact_phrase_search(self, phrase, limit=20):
+        """Search for exact phrase matches using pre-indexed phrases"""
+        self.connect()
+        
+        phrase_lower = phrase.lower()
+        
+        query = '''
             SELECT 
-                p.chapter_id,
-                p.position,
+                p.phrase,
                 c.content,
                 c.chapter_title,
                 w.title as work_title,
@@ -45,122 +62,174 @@ class PhraseSearchEngine:
             JOIN authors a ON w.author_id = a.id
             WHERE p.phrase = ?
             LIMIT ?
-        ''', (normalized_phrase, limit))
+        '''
         
+        self.cursor.execute(query, (phrase_lower, limit))
         results = []
-        for row in cursor.fetchall():
-            # Extract context around the match
-            context = self._get_context(row['content'], normalized_phrase)
-            
-            results.append({
-                'author': row['author_name'],
-                'work': row['work_title'],
-                'chapter': row['chapter_title'],
-                'url': row['url'],
-                'context': context,
-                'match_type': 'exact'
-            })
         
+        for row in self.cursor.fetchall():
+            # Get context around the phrase
+            content = row[1]
+            phrase_pos = content.lower().find(phrase_lower)
+            
+            if phrase_pos >= 0:
+                start = max(0, phrase_pos - 100)
+                end = min(len(content), phrase_pos + len(phrase_lower) + 100)
+                context = content[start:end]
+                
+                results.append({
+                    'phrase': row[0],
+                    'context': context,
+                    'chapter': row[2],
+                    'work': row[3],
+                    'author': row[4],
+                    'url': row[5]
+                })
+        
+        self.close()
         return results
     
-    def proximity_search(self, words: List[str], max_distance=5, limit=50) -> List[Dict]:
-        """
-        Search for words within a certain distance of each other
-        max_distance: maximum number of words between search terms
-        """
-        cursor = self.conn.cursor()
+    def full_text_search(self, query, limit=20):
+        """Full-text search using FTS5"""
+        self.connect()
         
-        # Build FTS5 query - use OR to find any document with the words
-        fts_query = ' OR '.join(words)
-        
-        cursor.execute('''
+        sql = '''
             SELECT 
-                c.id as chapter_id,
+                c.content,
+                c.chapter_title,
+                w.title as work_title,
+                a.name as author_name,
+                w.url,
+                c.id
+            FROM content_fts fts
+            JOIN chapters c ON fts.chapter_id = c.id
+            JOIN works w ON c.work_id = w.id
+            JOIN authors a ON w.author_id = a.id
+            WHERE content_fts MATCH ?
+            LIMIT ?
+        '''
+        
+        self.cursor.execute(sql, (query, limit))
+        results = []
+        
+        for row in self.cursor.fetchall():
+            # Extract relevant context
+            content = row[0]
+            words = query.lower().split()
+            
+            # Find first occurrence of any search word
+            best_pos = -1
+            for word in words:
+                pos = content.lower().find(word)
+                if pos >= 0 and (best_pos < 0 or pos < best_pos):
+                    best_pos = pos
+            
+            if best_pos >= 0:
+                start = max(0, best_pos - 100)
+                end = min(len(content), best_pos + 200)
+                context = content[start:end]
+            else:
+                context = content[:200]
+            
+            results.append({
+                'context': context,
+                'chapter': row[1],
+                'work': row[2],
+                'author': row[3],
+                'url': row[4]
+            })
+        
+        self.close()
+        return results
+    
+    def proximity_search(self, words, max_distance=10, limit=20):
+        """Search for words that appear near each other"""
+        self.connect()
+        
+        # Use FTS to find documents containing all words
+        query = ' AND '.join(words)
+        
+        sql = '''
+            SELECT 
                 c.content,
                 c.chapter_title,
                 w.title as work_title,
                 a.name as author_name,
                 w.url
-            FROM content_fts AS fts
-            JOIN chapters c ON fts.rowid = c.id
+            FROM content_fts fts
+            JOIN chapters c ON fts.chapter_id = c.id
             JOIN works w ON c.work_id = w.id
             JOIN authors a ON w.author_id = a.id
-            WHERE fts.content MATCH ?
+            WHERE content_fts MATCH ?
             LIMIT ?
-        ''', (fts_query, limit * 3))  # Get more results to filter
+        '''
         
+        self.cursor.execute(sql, (query, limit * 2))
         results = []
-        for row in cursor.fetchall():
-            # Check if words appear within max_distance
-            content_words = re.findall(r'\b\w+\b', row['content'].lower())
-            positions = defaultdict(list)
+        
+        for row in self.cursor.fetchall():
+            content = row[0].lower()
             
-            # Find all positions of each search word
-            for i, word in enumerate(content_words):
-                for search_word in words:
-                    if word == search_word.lower():
-                        positions[search_word.lower()].append(i)
-            
-            # Check if all words are present
-            if len(positions) != len(words):
-                continue
-            
-            # Find proximity matches
-            for pos1 in positions[words[0].lower()]:
-                match_found = True
-                max_pos = pos1
-                min_pos = pos1
-                
-                for word in words[1:]:
-                    # Find closest position of this word to pos1
-                    closest_pos = min(positions[word.lower()], 
-                                     key=lambda x: abs(x - pos1))
-                    
-                    if abs(closest_pos - pos1) > max_distance + len(words):
-                        match_found = False
+            # Find positions of all words
+            positions = {word: [] for word in words}
+            for word in words:
+                word_lower = word.lower()
+                pos = 0
+                while True:
+                    pos = content.find(word_lower, pos)
+                    if pos < 0:
                         break
-                    
-                    max_pos = max(max_pos, closest_pos)
-                    min_pos = min(min_pos, closest_pos)
-                
-                if match_found and (max_pos - min_pos) <= max_distance + len(words):
-                    # Extract context
-                    start = max(0, min_pos - 10)
-                    end = min(len(content_words), max_pos + 10)
-                    context = ' '.join(content_words[start:end])
-                    
-                    results.append({
-                        'author': row['author_name'],
-                        'work': row['work_title'],
-                        'chapter': row['chapter_title'],
-                        'url': row['url'],
-                        'context': context,
-                        'match_type': f'proximity(distance={max_pos - min_pos})',
-                        'distance': max_pos - min_pos
-                    })
-                    
-                    if len(results) >= limit:
-                        return results
+                    positions[word].append(pos)
+                    pos += 1
+            
+            # Check if any combination is within max_distance
+            found_close = False
+            for i, word1 in enumerate(words[:-1]):
+                for word2 in words[i+1:]:
+                    for pos1 in positions[word1]:
+                        for pos2 in positions[word2]:
+                            distance = abs(pos2 - pos1)
+                            if distance <= max_distance * 10:  # rough estimate
+                                found_close = True
+                                # Get context
+                                min_pos = min(pos1, pos2)
+                                start = max(0, min_pos - 100)
+                                end = min(len(content), max(pos1, pos2) + 100)
+                                context = row[0][start:end]
+                                
+                                results.append({
+                                    'context': context,
+                                    'chapter': row[1],
+                                    'work': row[2],
+                                    'author': row[3],
+                                    'url': row[4],
+                                    'distance': distance
+                                })
+                                break
+                        if found_close:
+                            break
+                    if found_close:
+                        break
+                if found_close:
                     break
+            
+            if len(results) >= limit:
+                break
         
-        return results
+        self.close()
+        return results[:limit]
     
-    def fuzzy_phrase_search(self, phrase: str, threshold=0.8, limit=50) -> List[Dict]:
-        """
-        Search for phrases similar to the query using similarity matching
-        threshold: minimum similarity score (0-1)
-        """
-        cursor = self.conn.cursor()
+    def fuzzy_phrase_search(self, phrase, threshold=0.8, limit=20):
+        """Search for similar phrases using similarity scoring"""
+        self.connect()
         
-        # Normalize phrase
-        normalized_phrase = ' '.join(re.findall(r'\b\w+\b', phrase.lower()))
-        phrase_length = len(normalized_phrase.split())
+        phrase_lower = phrase.lower()
+        phrase_length = len(phrase_lower.split())
         
-        # Get all phrases of similar length
-        cursor.execute('''
+        # Get phrases of similar length
+        query = '''
             SELECT DISTINCT
                 p.phrase,
-                p.chapter_id,
                 c.content,
                 c.chapter_title,
                 w.title as work_title,
@@ -171,319 +240,201 @@ class PhraseSearchEngine:
             JOIN works w ON c.work_id = w.id
             JOIN authors a ON w.author_id = a.id
             WHERE p.length BETWEEN ? AND ?
-            LIMIT ?
-        ''', (phrase_length - 1, phrase_length + 1, limit * 100))
+            LIMIT 1000
+        '''
         
+        self.cursor.execute(query, (phrase_length - 1, phrase_length + 1))
         results = []
-        seen_chapters = set()
         
-        for row in cursor.fetchall():
-            # Calculate similarity
-            similarity = difflib.SequenceMatcher(
-                None, 
-                normalized_phrase, 
-                row['phrase']
-            ).ratio()
+        for row in self.cursor.fetchall():
+            stored_phrase = row[0]
+            similarity = SequenceMatcher(None, phrase_lower, stored_phrase).ratio()
             
             if similarity >= threshold:
-                chapter_id = row['chapter_id']
+                content = row[1]
+                phrase_pos = content.lower().find(stored_phrase)
                 
-                # Avoid duplicate results from same chapter
-                if chapter_id in seen_chapters:
-                    continue
-                seen_chapters.add(chapter_id)
-                
-                # Extract context
-                context = self._get_context(row['content'], row['phrase'])
-                
-                results.append({
-                    'author': row['author_name'],
-                    'work': row['work_title'],
-                    'chapter': row['chapter_title'],
-                    'url': row['url'],
-                    'context': context,
-                    'match_type': f'fuzzy(similarity={similarity:.2f})',
-                    'similarity': similarity,
-                    'matched_phrase': row['phrase']
-                })
-                
-                if len(results) >= limit:
-                    break
+                if phrase_pos >= 0:
+                    start = max(0, phrase_pos - 100)
+                    end = min(len(content), phrase_pos + len(stored_phrase) + 100)
+                    context = content[start:end]
+                    
+                    results.append({
+                        'phrase': stored_phrase,
+                        'similarity': similarity,
+                        'context': context,
+                        'chapter': row[2],
+                        'work': row[3],
+                        'author': row[4],
+                        'url': row[5]
+                    })
         
         # Sort by similarity
         results.sort(key=lambda x: x['similarity'], reverse=True)
+        
+        self.close()
         return results[:limit]
     
-    def boolean_search(self, query: str, limit=50) -> List[Dict]:
-        """
-        Boolean search with AND, OR, NOT operators
-        Example: "faith AND hope NOT despair"
-        """
-        cursor = self.conn.cursor()
+    def combined_search(self, query, limit=20):
+        """Combine multiple search methods"""
+        results = {
+            'exact': [],
+            'proximity': [],
+            'fuzzy': [],
+            'full_text': []
+        }
         
-        cursor.execute('''
+        # Try exact phrase search
+        results['exact'] = self.exact_phrase_search(query, limit=10)
+        
+        # Try proximity search if query has multiple words
+        words = query.split()
+        if len(words) > 1:
+            results['proximity'] = self.proximity_search(words, limit=10)
+        
+        # Try fuzzy search
+        results['fuzzy'] = self.fuzzy_phrase_search(query, threshold=0.75, limit=10)
+        
+        # Try full-text search
+        results['full_text'] = self.full_text_search(query, limit=10)
+        
+        return results
+    
+    def search_by_author(self, author_name, limit=20):
+        """Search for all works by a specific author"""
+        self.connect()
+        
+        query = '''
             SELECT 
-                c.id as chapter_id,
-                c.content,
+                w.title,
+                w.url,
                 c.chapter_title,
-                w.title as work_title,
-                a.name as author_name,
-                w.url
-            FROM content_fts AS fts
-            JOIN chapters c ON fts.rowid = c.id
-            JOIN works w ON c.work_id = w.id
-            JOIN authors a ON w.author_id = a.id
-            WHERE fts.content MATCH ?
+                c.content
+            FROM authors a
+            JOIN works w ON a.id = w.author_id
+            JOIN chapters c ON w.id = c.work_id
+            WHERE a.name LIKE ?
             LIMIT ?
-        ''', (query, limit))
+        '''
         
+        self.cursor.execute(query, (f'%{author_name}%', limit))
         results = []
-        for row in cursor.fetchall():
-            # Extract relevant snippet
-            words = query.replace(' AND ', ' ').replace(' OR ', ' ').replace(' NOT ', ' ').split()
-            snippet = self._extract_snippet(row['content'], words)
-            
+        
+        for row in self.cursor.fetchall():
             results.append({
-                'author': row['author_name'],
-                'work': row['work_title'],
-                'chapter': row['chapter_title'],
-                'url': row['url'],
-                'context': snippet,
-                'match_type': 'boolean'
+                'work': row[0],
+                'url': row[1],
+                'chapter': row[2],
+                'context': row[3][:200]
             })
         
+        self.close()
         return results
     
-    def combined_search(self, phrase: str, strategies=['exact', 'proximity', 'fuzzy'], 
-                       limit=50) -> Dict[str, List[Dict]]:
-        """
-        Run multiple search strategies and combine results
-        Returns a dict with results from each strategy
-        """
-        results = {}
+    def list_authors(self):
+        """Get list of all authors"""
+        self.connect()
         
-        if 'exact' in strategies:
-            results['exact'] = self.exact_phrase_search(phrase, limit)
+        query = '''
+            SELECT 
+                a.name,
+                a.dates,
+                a.is_saint,
+                a.is_doctor,
+                COUNT(w.id) as work_count
+            FROM authors a
+            LEFT JOIN works w ON a.id = w.author_id
+            GROUP BY a.id
+            ORDER BY a.name
+        '''
         
-        if 'proximity' in strategies:
-            words = phrase.split()
-            if len(words) > 1:
-                results['proximity'] = self.proximity_search(words, limit=limit)
-            else:
-                results['proximity'] = []
+        self.cursor.execute(query)
+        results = []
         
-        if 'fuzzy' in strategies:
-            results['fuzzy'] = self.fuzzy_phrase_search(phrase, limit=limit)
+        for row in self.cursor.fetchall():
+            results.append({
+                'name': row[0],
+                'dates': row[1],
+                'is_saint': bool(row[2]),
+                'is_doctor': bool(row[3]),
+                'work_count': row[4]
+            })
         
-        if 'boolean' in strategies:
-            # Convert to simple AND query
-            boolean_query = ' AND '.join(phrase.split())
-            results['boolean'] = self.boolean_search(boolean_query, limit)
-        
+        self.close()
         return results
-    
-    def search_by_author(self, author_name: str, phrase: str = None, limit=50) -> List[Dict]:
-        """Filter search results by author"""
-        cursor = self.conn.cursor()
-        
-        if phrase:
-            normalized_phrase = ' '.join(re.findall(r'\b\w+\b', phrase.lower()))
-            cursor.execute('''
-                SELECT 
-                    c.content,
-                    c.chapter_title,
-                    w.title as work_title,
-                    a.name as author_name,
-                    w.url
-                FROM phrases p
-                JOIN chapters c ON p.chapter_id = c.id
-                JOIN works w ON c.work_id = w.id
-                JOIN authors a ON w.author_id = a.id
-                WHERE p.phrase = ? AND a.name LIKE ?
-                LIMIT ?
-            ''', (normalized_phrase, f'%{author_name}%', limit))
-        else:
-            cursor.execute('''
-                SELECT 
-                    c.content,
-                    c.chapter_title,
-                    w.title as work_title,
-                    a.name as author_name,
-                    w.url
-                FROM chapters c
-                JOIN works w ON c.work_id = w.id
-                JOIN authors a ON w.author_id = a.id
-                WHERE a.name LIKE ?
-                LIMIT ?
-            ''', (f'%{author_name}%', limit))
-        
-        return [dict(row) for row in cursor.fetchall()]
-    
-    def _get_context(self, content: str, phrase: str, context_words=20) -> str:
-        """Extract context around a phrase in content"""
-        # Find phrase in content
-        content_lower = content.lower()
-        phrase_lower = phrase.lower()
-        
-        pos = content_lower.find(phrase_lower)
-        if pos == -1:
-            # If exact match not found, return first few words
-            words = content.split()
-            return ' '.join(words[:50]) + '...'
-        
-        # Extract context
-        words = content.split()
-        content_words = ' '.join(words).lower()
-        phrase_pos = content_words.find(phrase_lower)
-        
-        # Find word boundaries
-        before_context = content_words[:phrase_pos].split()[-context_words:]
-        after_context = content_words[phrase_pos:].split()[len(phrase.split()):context_words + len(phrase.split())]
-        
-        context_parts = []
-        if before_context:
-            context_parts.append(' '.join(before_context))
-        context_parts.append(phrase)
-        if after_context:
-            context_parts.append(' '.join(after_context))
-        
-        return '...' + ' '.join(context_parts) + '...'
-    
-    def _extract_snippet(self, content: str, keywords: List[str], max_length=200) -> str:
-        """Extract a relevant snippet containing keywords"""
-        words = content.split()
-        keyword_positions = []
-        
-        for i, word in enumerate(words):
-            if any(kw.lower() in word.lower() for kw in keywords):
-                keyword_positions.append(i)
-        
-        if not keyword_positions:
-            return ' '.join(words[:max_length]) + '...'
-        
-        # Get snippet around first keyword
-        start_pos = max(0, keyword_positions[0] - 20)
-        end_pos = min(len(words), keyword_positions[0] + 30)
-        
-        snippet = ' '.join(words[start_pos:end_pos])
-        return '...' + snippet + '...'
-    
-    def get_stats(self) -> Dict:
-        """Get database statistics"""
-        cursor = self.conn.cursor()
-        
-        stats = {}
-        
-        cursor.execute('SELECT COUNT(*) FROM authors')
-        stats['total_authors'] = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM works')
-        stats['total_works'] = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM chapters')
-        stats['total_chapters'] = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(DISTINCT phrase) FROM phrases')
-        stats['unique_phrases'] = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM phrases')
-        stats['total_phrase_occurrences'] = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM trigrams')
-        stats['total_trigrams'] = cursor.fetchone()[0]
-        
-        return stats
-    
-    def close(self):
-        """Close database connection"""
-        if self.conn:
-            self.conn.close()
-
 
 def main():
-    """Interactive search interface"""
+    """Command-line interface for testing"""
     import argparse
     
     parser = argparse.ArgumentParser(description='Search Church Fathers database')
-    parser.add_argument('--db', default='church_fathers.db', help='Database file path')
     parser.add_argument('--query', help='Search query')
-    parser.add_argument('--type', default='combined', 
-                       choices=['exact', 'proximity', 'fuzzy', 'boolean', 'combined'],
-                       help='Search type')
-    parser.add_argument('--limit', type=int, default=10, help='Max results')
+    parser.add_argument('--type', choices=['exact', 'proximity', 'fuzzy', 'combined', 'fts'], 
+                       default='combined', help='Search type')
+    parser.add_argument('--limit', type=int, default=20, help='Number of results')
     parser.add_argument('--stats', action='store_true', help='Show database statistics')
+    parser.add_argument('--authors', action='store_true', help='List all authors')
     
     args = parser.parse_args()
     
-    engine = PhraseSearchEngine(db_path=args.db)
+    engine = PhraseSearchEngine()
     
-    try:
-        if args.stats:
-            stats = engine.get_stats()
-            print("\n=== Database Statistics ===")
-            for key, value in stats.items():
-                print(f"{key}: {value:,}")
-            return
+    if args.stats:
+        stats = engine.get_stats()
+        print("\n=== Database Statistics ===")
+        for key, value in stats.items():
+            print(f"{key.capitalize()}: {value:,}")
+        return
+    
+    if args.authors:
+        authors = engine.list_authors()
+        print("\n=== Authors ===")
+        for author in authors:
+            saint = " [SAINT]" if author['is_saint'] else ""
+            doctor = " [DOCTOR]" if author['is_doctor'] else ""
+            print(f"{author['name']}{saint}{doctor} ({author['dates']}) - {author['work_count']} works")
+        return
+    
+    if not args.query:
+        print("Please provide a --query or use --stats or --authors")
+        return
+    
+    print(f"\nSearching for: '{args.query}' (type: {args.type})")
+    print("=" * 60)
+    
+    if args.type == 'exact':
+        results = engine.exact_phrase_search(args.query, args.limit)
+    elif args.type == 'proximity':
+        words = args.query.split()
+        results = engine.proximity_search(words, limit=args.limit)
+    elif args.type == 'fuzzy':
+        results = engine.fuzzy_phrase_search(args.query, limit=args.limit)
+    elif args.type == 'fts':
+        results = engine.full_text_search(args.query, limit=args.limit)
+    else:  # combined
+        all_results = engine.combined_search(args.query, args.limit)
+        print(f"\nFound {len(all_results['exact'])} exact matches")
+        print(f"Found {len(all_results['proximity'])} proximity matches")
+        print(f"Found {len(all_results['fuzzy'])} fuzzy matches")
+        print(f"Found {len(all_results['full_text'])} full-text matches")
         
-        if not args.query:
-            # Interactive mode
-            print("Church Fathers Phrase Search Engine")
-            print("=" * 50)
-            while True:
-                query = input("\nEnter search phrase (or 'quit'): ").strip()
-                if query.lower() == 'quit':
-                    break
-                
-                if not query:
-                    continue
-                
-                print(f"\nSearching for: '{query}'")
-                print("-" * 50)
-                
-                if args.type == 'combined':
-                    results = engine.combined_search(query, limit=args.limit)
-                    for search_type, result_list in results.items():
-                        if result_list:
-                            print(f"\n{search_type.upper()} MATCHES ({len(result_list)}):")
-                            for i, result in enumerate(result_list[:3], 1):
-                                print(f"\n{i}. {result['author']} - {result['work']}")
-                                print(f"   Chapter: {result['chapter']}")
-                                print(f"   {result['context'][:150]}...")
-                elif args.type == 'exact':
-                    results = engine.exact_phrase_search(query, args.limit)
-                    for i, result in enumerate(results, 1):
-                        print(f"\n{i}. {result['author']} - {result['work']}")
-                        print(f"   {result['context'][:200]}...")
-                elif args.type == 'proximity':
-                    words = query.split()
-                    results = engine.proximity_search(words, limit=args.limit)
-                    for i, result in enumerate(results, 1):
-                        print(f"\n{i}. {result['author']} - {result['work']}")
-                        print(f"   Distance: {result['distance']}")
-                        print(f"   {result['context'][:200]}...")
-                elif args.type == 'fuzzy':
-                    results = engine.fuzzy_phrase_search(query, limit=args.limit)
-                    for i, result in enumerate(results, 1):
-                        print(f"\n{i}. {result['author']} - {result['work']}")
-                        print(f"   Matched: '{result['matched_phrase']}' (similarity: {result['similarity']:.2f})")
-                        print(f"   {result['context'][:200]}...")
-        else:
-            # Single query mode
-            print(f"Searching for: '{args.query}'")
-            
-            if args.type == 'combined':
-                results = engine.combined_search(args.query, limit=args.limit)
-                for search_type, result_list in results.items():
-                    print(f"\n{search_type.upper()} - {len(result_list)} results")
-            elif args.type == 'exact':
-                results = engine.exact_phrase_search(args.query, args.limit)
-                print(f"\nFound {len(results)} exact matches")
-                for result in results[:5]:
-                    print(f"- {result['author']}: {result['work']}")
+        # Show first few of each type
+        for result_type, result_list in all_results.items():
+            if result_list:
+                print(f"\n--- {result_type.upper()} RESULTS ---")
+                for i, result in enumerate(result_list[:3], 1):
+                    print(f"\n{i}. {result['author']} - {result['work']}")
+                    print(f"   Chapter: {result['chapter']}")
+                    print(f"   Context: ...{result['context']}...")
+        return
     
-    finally:
-        engine.close()
-
+    print(f"\nFound {len(results)} results\n")
+    
+    for i, result in enumerate(results, 1):
+        print(f"{i}. {result['author']} - {result['work']}")
+        print(f"   Chapter: {result['chapter']}")
+        print(f"   Context: ...{result['context']}...")
+        print()
 
 if __name__ == '__main__':
     main()
