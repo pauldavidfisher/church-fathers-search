@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Church Fathers Search Engine</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⛪ Church Fathers Search Engine</h1>
+            <p class="subtitle">Search the writings of early Christian theologians with advanced phrase matching</p>
+            
+            <div class="stats">
+                <span><strong>{{ stats.total_authors }}</strong> Authors</span>
+                <span><strong>{{ stats.total_works }}</strong> Works</span>
+                <span><strong>{{ stats.total_chapters }}</strong> Chapters</span>
+                <span><strong>{{ '{:,}'.format(stats.unique_phrases) }}</strong> Unique Phrases</span>
+            </div>
+        </header>
+
+        <div class="search-section">
+            <div class="search-bar">
+                <input type="text" id="searchInput" placeholder="Enter a phrase to search (e.g., 'love of God')" autofocus>
+                <button id="searchButton">Search</button>
+            </div>
+
+            <div class="search-options">
+                <div class="option-group">
+                    <label>Search Type:</label>
+                    <select id="searchType">
+                        <option value="combined">All Methods (Combined)</option>
+                        <option value="exact">Exact Phrase</option>
+                        <option value="proximity">Proximity (Words Near Each Other)</option>
+                        <option value="fuzzy">Fuzzy (Similar Phrases)</option>
+                        <option value="boolean">Boolean (AND/OR/NOT)</option>
+                    </select>
+                </div>
+
+                <div class="option-group">
+                    <label>Filter by Author:</label>
+                    <input type="text" id="authorFilter" placeholder="e.g., Augustine, Jerome">
+                </div>
+
+                <div class="option-group">
+                    <label>Max Results:</label>
+                    <select id="limitSelect">
+                        <option value="10">10</option>
+                        <option value="20" selected>20</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Searching the Church Fathers...</p>
+        </div>
+
+        <div id="results" class="results"></div>
+
+        <footer>
+            <p>Data source: <a href="https://www.newadvent.org/fathers/" target="_blank">New Advent</a></p>
+            <p>Search Methods: Exact phrase matching | Proximity search | Fuzzy matching | Boolean operators</p>
+        </footer>
+    </div>
+
+    <script src="/static/js/search.js"></script>
+</body>
+</html>
