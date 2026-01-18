@@ -1,62 +1,67 @@
-#!/usr/bin/env python3
-"""
-Flask Web Interface for Church Fathers Search Engine
-"""
-
 from flask import Flask, render_template, request, jsonify
 from search_engine import PhraseSearchEngine
 import os
 
 app = Flask(__name__)
-app.config['JSON_SORT_KEYS'] = False
-
-# Initialize search engine
-DB_PATH = os.environ.get('DB_PATH', 'church_fathers.db')
-search_engine = PhraseSearchEngine(DB_PATH)
-
 
 @app.route('/')
 def index():
     """Main search page"""
-    stats = search_engine.get_stats()
+    engine = PhraseSearchEngine()
+    try:
+        stats = engine.get_stats()
+        # Make sure all expected stats exist
+        if 'phrases' not in stats:
+            stats['phrases'] = 0
+        stats['unique_phrases'] = stats.get('phrases', 0)  # Add unique_phrases
+    except Exception as e:
+        print(f"Error getting stats: {e}")
+        stats = {
+            'authors': 0,
+            'works': 0,
+            'chapters': 0,
+            'phrases': 0,
+            'unique_phrases': 0
+        }
+    
     return render_template('index.html', stats=stats)
 
-
 @app.route('/api/search', methods=['POST'])
-def api_search():
-    """API endpoint for search"""
+def search():
+    """API endpoint for searching"""
     data = request.get_json()
     
-    query = data.get('query', '').strip()
+    query = data.get('query', '')
     search_type = data.get('type', 'combined')
-    limit = int(data.get('limit', 20))
-    author_filter = data.get('author', '').strip()
+    author_filter = data.get('author', '')
+    limit = data.get('limit', 20)
     
     if not query:
-        return jsonify({'error': 'Query cannot be empty'}), 400
+        return jsonify({'error': 'No query provided'}), 400
+    
+    engine = PhraseSearchEngine()
     
     try:
         if search_type == 'exact':
-            results = {'exact': search_engine.exact_phrase_search(query, limit)}
+            results = {'exact': engine.exact_phrase_search(query, limit)}
         elif search_type == 'proximity':
             words = query.split()
-            results = {'proximity': search_engine.proximity_search(words, limit=limit)}
+            results = {'proximity': engine.proximity_search(words, limit=limit)}
         elif search_type == 'fuzzy':
-            results = {'fuzzy': search_engine.fuzzy_phrase_search(query, limit=limit)}
-        elif search_type == 'boolean':
-            boolean_query = ' AND '.join(query.split())
-            results = {'boolean': search_engine.boolean_search(boolean_query, limit)}
+            results = {'fuzzy': engine.fuzzy_phrase_search(query, limit=limit)}
+        elif search_type == 'fts':
+            results = {'full_text': engine.full_text_search(query, limit=limit)}
         else:  # combined
-            results = search_engine.combined_search(query, limit=limit)
+            results = engine.combined_search(query, limit)
         
-        # Apply author filter if specified
+        # Filter by author if specified
         if author_filter:
             for key in results:
                 results[key] = [r for r in results[key] 
-                               if author_filter.lower() in r['author'].lower()]
+                               if author_filter.lower() in r.get('author', '').lower()]
         
-        # Calculate total results
-        total = sum(len(v) for v in results.values())
+        # Count total results
+        total = sum(len(results[key]) for key in results)
         
         return jsonify({
             'query': query,
@@ -65,25 +70,29 @@ def api_search():
         })
     
     except Exception as e:
+        print(f"Search error: {e}")
         return jsonify({'error': str(e)}), 500
 
-
 @app.route('/api/stats')
-def api_stats():
+def get_stats():
     """Get database statistics"""
-    stats = search_engine.get_stats()
-    return jsonify(stats)
-
+    engine = PhraseSearchEngine()
+    try:
+        stats = engine.get_stats()
+        stats['unique_phrases'] = stats.get('phrases', 0)
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/authors')
-def api_authors():
+def get_authors():
     """Get list of all authors"""
-    cursor = search_engine.conn.cursor()
-    cursor.execute('SELECT name, is_saint, is_doctor FROM authors ORDER BY name')
-    authors = [{'name': row[0], 'is_saint': bool(row[1]), 'is_doctor': bool(row[2])} 
-               for row in cursor.fetchall()]
-    return jsonify(authors)
-
+    engine = PhraseSearchEngine()
+    try:
+        authors = engine.list_authors()
+        return jsonify({'authors': authors})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     import os
